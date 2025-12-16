@@ -1,0 +1,2 @@
+D:\компьютерная графика\lab12\x64\Debug\glew32d.dll
+D:\компьютерная графика\lab12\lab12\x64\Debug\lab12.vcxproj.Up2Date
