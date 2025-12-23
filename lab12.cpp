@@ -8,6 +8,9 @@
 #include <vector>
 #include <algorithm>
 
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+
 using namespace std;
 
 // ==================== Глобальные переменные ====================
@@ -17,14 +20,14 @@ HGLRC g_hRC;
 
 int currentScene = 1;
 float tetraX = 0.0f, tetraY = 0.0f, tetraZ = -3.0f;
-float cubeColorInfluence = 0.5f;
-float textureMixRatio = 0.5f;
-float circleScaleX = 1.0f, circleScaleY = 1.0f, circleScaleZ = 1.0f;
+float colorInfluence = 0.5f;  // Влияние цвета на текстуру (0..1)
+float textureMixRatio = 0.5f; // Смешивание двух текстур (0..1)
+float circleScaleX = 1.0f, circleScaleY = 1.0f;
 
-GLuint texture1, texture2;
+GLuint textureWater, textureWood;
 GLuint programTet, programCubeTex, programCubeTwoTex, programCircle;
 GLuint tetraVAO, tetraVBO, tetraEBO;
-GLuint cubeVAO, cubeVBO, cubeEBO;  // Добавил cubeEBO здесь
+GLuint cubeVAO, cubeVBO, cubeEBO;
 GLuint circleVAO, circleVBO, circleEBO;
 
 int windowWidth = 800;
@@ -47,6 +50,7 @@ const char* vertexShaderSource =
 "    TexCoord = aTexCoord;\n"
 "}\n";
 
+// ФРАГМЕНТНЫЙ ШЕЙДЕР для сцены 2: текстура меняет цвет под влиянием цвета вершин
 const char* fragmentShaderSource =
 "#version 330 core\n"
 "in vec3 ourColor;\n"
@@ -56,9 +60,15 @@ const char* fragmentShaderSource =
 "uniform float colorInfluence;\n"
 "void main() {\n"
 "    vec4 texColor = texture(texture1, TexCoord);\n"
-"    FragColor = mix(texColor, vec4(ourColor, 1.0), colorInfluence);\n"
+"    // Текстура умножается на цвет вершин, а не заменяется им\n"
+"    // colorInfluence = 0.0: текстура без изменений\n"
+"    // colorInfluence = 0.5: текстура * цвет на 50%\n"
+"    // colorInfluence = 1.0: текстура полностью окрашена в цвет вершин\n"
+"    vec3 tintedColor = mix(texColor.rgb, texColor.rgb * ourColor, colorInfluence);\n"
+"    FragColor = vec4(tintedColor, texColor.a);\n"
 "}\n";
 
+// ФРАГМЕНТНЫЙ ШЕЙДЕР для сцены 3: только смешивание двух текстур
 const char* fragmentTwoTextures =
 "#version 330 core\n"
 "in vec3 ourColor;\n"
@@ -70,6 +80,7 @@ const char* fragmentTwoTextures =
 "void main() {\n"
 "    vec4 tex1 = texture(texture1, TexCoord);\n"
 "    vec4 tex2 = texture(texture2, TexCoord);\n"
+"    // Просто смешиваем две текстуры\n"
 "    FragColor = mix(tex1, tex2, mixRatio);\n"
 "}\n";
 
@@ -133,45 +144,57 @@ GLuint createProgram(const char* vertexSrc, const char* fragmentSrc) {
     return program;
 }
 
-GLuint loadTexture() {
-    const int width = 64, height = 64;
-    unsigned char* image = new unsigned char[width * height * 3];
-
-    // Создаем шахматную текстуру
-    for (int i = 0; i < height; i++) {
-        for (int j = 0; j < width; j++) {
-            unsigned char c = ((((i & 0x8) == 0) ^ ((j & 0x8) == 0))) * 255;
-            int index = (i * width + j) * 3;
-            image[index] = c;
-            image[index + 1] = c;
-            image[index + 2] = c;
-        }
+GLuint loadTextureFromFile(const char* filename, bool flipY = true) {
+    int width, height, channels;
+    stbi_set_flip_vertically_on_load(flipY);
+    unsigned char* image = stbi_load(filename, &width, &height, &channels, 0);
+    if (!image) {
+        cout << "Failed to load texture: " << filename << endl;
+        return 0;
     }
 
     GLuint texture;
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
-    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, image);
-    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+
+    GLenum format = GL_RGB;
+    if (channels == 4) format = GL_RGBA;
+    else if (channels == 1) format = GL_RED;
+
+    glTexImage2D(GL_TEXTURE_2D, 0, format, width, height, 0, format, GL_UNSIGNED_BYTE, image);
+
+    // Улучшенная фильтрация для устранения зернистости
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR_MIPMAP_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 
-    delete[] image;
+    glGenerateMipmap(GL_TEXTURE_2D);
+
+    stbi_image_free(image);
+    cout << "Loaded texture: " << filename << " (" << width << "x" << height << ", channels: " << channels << ")" << endl;
     return texture;
 }
 
-GLuint loadColorfulTexture() {
-    const int width = 64, height = 64;
+// Создаем простые тестовые текстуры программно (если файлы не найдены)
+GLuint createWaterTexture() {
+    const int width = 256, height = 256;
     unsigned char* image = new unsigned char[width * height * 3];
 
-    // Создаем цветную текстуру (градиент)
     for (int i = 0; i < height; i++) {
         for (int j = 0; j < width; j++) {
             int index = (i * width + j) * 3;
-            image[index] = (unsigned char)((float)j / width * 255);     // R
-            image[index + 1] = (unsigned char)((float)i / height * 255); // G
-            image[index + 2] = (unsigned char)((float)(i + j) / (width + height) * 255); // B
+
+            // Простая синяя текстура с легкими волнами
+            float wave = sin(i * 0.05f + j * 0.02f) * 0.2f + 0.5f;
+
+            unsigned char blue = 150 + (unsigned char)(wave * 100);
+            unsigned char green = 200 + (unsigned char)(wave * 50);
+            unsigned char red = 100 + (unsigned char)(wave * 50);
+
+            image[index] = red;
+            image[index + 1] = green;
+            image[index + 2] = blue;
         }
     }
 
@@ -179,25 +202,89 @@ GLuint loadColorfulTexture() {
     glGenTextures(1, &texture);
     glBindTexture(GL_TEXTURE_2D, texture);
     glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, image);
+
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
     glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
 
     delete[] image;
+    cout << "Created water texture (256x256)" << endl;
     return texture;
+}
+
+GLuint createWoodTexture() {
+    const int width = 256, height = 256;
+    unsigned char* image = new unsigned char[width * height * 3];
+
+    for (int i = 0; i < height; i++) {
+        for (int j = 0; j < width; j++) {
+            int index = (i * width + j) * 3;
+
+            // Простая коричневая текстура дерева
+            float grain = sin(i * 0.1f) * 0.3f + 0.7f;
+            float rings = sin(sqrt((i - 128) * (i - 128) + (j - 128) * (j - 128)) * 0.05f) * 0.2f + 0.5f;
+            float pattern = (grain + rings) * 0.5f;
+
+            unsigned char red = (unsigned char)(139 * pattern);
+            unsigned char green = (unsigned char)(69 * pattern);
+            unsigned char blue = (unsigned char)(19 * pattern);
+
+            image[index] = red;
+            image[index + 1] = green;
+            image[index + 2] = blue;
+        }
+    }
+
+    GLuint texture;
+    glGenTextures(1, &texture);
+    glBindTexture(GL_TEXTURE_2D, texture);
+    glTexImage2D(GL_TEXTURE_2D, 0, GL_RGB, width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, image);
+
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_REPEAT);
+    glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_REPEAT);
+
+    delete[] image;
+    cout << "Created wood texture (256x256)" << endl;
+    return texture;
+}
+
+GLuint loadWaterTexture() {
+    // Пробуем загрузить из файла, если не получится - создадим
+    GLuint tex = loadTextureFromFile("water.jpg", false);
+    if (tex == 0) {
+        tex = loadTextureFromFile("water.png", false);
+    }
+    if (tex == 0) {
+        tex = createWaterTexture();
+    }
+    return tex;
+}
+
+GLuint loadWoodTexture() {
+    // Пробуем загрузить из файла, если не получится - создадим
+    GLuint tex = loadTextureFromFile("wood.jpg", false);
+    if (tex == 0) {
+        tex = loadTextureFromFile("wood.png", false);
+    }
+    if (tex == 0) {
+        tex = createWoodTexture();
+    }
+    return tex;
 }
 
 // ==================== Инициализация объектов ====================
 void initTetrahedron() {
-    // Вершины тетраэдра с цветами
+    // Вершины тетраэдра с цветами - специально повернуты для лучшего обзора
     float vertices[] = {
         // Верхняя вершина
         0.0f,  0.5f,  0.0f,   1.0f, 0.0f, 0.0f,  // Красный
         // Основание - треугольник
-        -0.5f, -0.5f,  0.5f,  0.0f, 1.0f, 0.0f,  // Зеленый
-        0.5f, -0.5f,  0.5f,   0.0f, 0.0f, 1.0f,  // Синий
-        0.0f, -0.5f, -0.5f,   1.0f, 1.0f, 0.0f   // Желтый
+        -0.5f, -0.5f, -0.5f,  0.0f, 1.0f, 0.0f,  // Зеленый
+        0.5f, -0.5f, -0.5f,   0.0f, 0.0f, 1.0f,  // Синий
+        0.0f, -0.5f,  0.5f,   1.0f, 1.0f, 0.0f   // Желтый
     };
 
     unsigned int indices[] = {
@@ -400,8 +487,8 @@ void initOpenGL() {
     programCircle = createProgram(vertexShaderSimple, fragmentShaderSimple);
 
     // Загрузка текстур
-    texture1 = loadTexture();           // Шахматная текстура
-    texture2 = loadColorfulTexture();   // Цветная текстура
+    textureWater = loadWaterTexture();
+    textureWood = loadWoodTexture();
 
     // Инициализация геометрии
     initTetrahedron();
@@ -445,18 +532,35 @@ void render() {
         model[13] = tetraY;
         model[14] = tetraZ;
 
-        // Поворот тетраэдра для лучшего обзора
+        // Автоповорот тетраэдра для лучшего обзора
         static float rotation = 0.0f;
-        rotation += 0.5f;
+        rotation += 1.0f;
         float angle = rotation * 3.14159f / 180.0f;
         float cosA = cos(angle);
         float sinA = sin(angle);
 
-        // Поворот вокруг оси Y и небольшой наклон
+        // Поворот вокруг оси Y
         model[0] = cosA;
         model[2] = sinA;
-        model[8] = -sinA * 0.5f;
-        model[10] = cosA * 0.5f;
+        model[8] = -sinA;
+        model[10] = cosA;
+
+        // Добавляем небольшой наклон, чтобы было видно, что это тетраэдр
+        float tiltAngle = 45.0f * 3.14159f / 180.0f;
+        float cosTilt = cos(tiltAngle);
+        float sinTilt = sin(tiltAngle);
+
+        float temp = model[1];
+        model[1] = model[1] * cosTilt - model[2] * sinTilt;
+        model[2] = temp * sinTilt + model[2] * cosTilt;
+
+        temp = model[5];
+        model[5] = model[5] * cosTilt - model[6] * sinTilt;
+        model[6] = temp * sinTilt + model[6] * cosTilt;
+
+        temp = model[9];
+        model[9] = model[9] * cosTilt - model[10] * sinTilt;
+        model[10] = temp * sinTilt + model[10] * cosTilt;
 
         // Передаем матрицы в шейдер
         GLint modelLoc = glGetUniformLocation(programTet, "model");
@@ -473,13 +577,13 @@ void render() {
         glBindVertexArray(0);
     }
     else if (currentScene == 2) {
-        // Кубик с текстурой и цветом
+        // Кубик с текстурой воды и цветом вершин
         glUseProgram(programCubeTex);
 
         float model[16] = { 0 };
         model[0] = 1.0f; model[5] = 1.0f; model[10] = 1.0f; model[15] = 1.0f;
 
-        // Небольшой поворот кубика для демонстрации
+        // Автоповорот кубика
         static float rotation = 0.0f;
         rotation += 1.0f;
         float angle = rotation * 3.14159f / 180.0f;
@@ -498,11 +602,11 @@ void render() {
         glUniformMatrix4fv(modelLoc, 1, GL_FALSE, model);
         glUniformMatrix4fv(viewLoc, 1, GL_FALSE, view);
         glUniformMatrix4fv(projLoc, 1, GL_FALSE, projection);
-        glUniform1f(colorInfLoc, cubeColorInfluence);
+        glUniform1f(colorInfLoc, colorInfluence);
 
-        // Активируем текстуру
+        // Активируем текстуру воды
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, texture1);
+        glBindTexture(GL_TEXTURE_2D, textureWater);
         GLint texLoc = glGetUniformLocation(programCubeTex, "texture1");
         glUniform1i(texLoc, 0);
 
@@ -512,13 +616,13 @@ void render() {
         glBindVertexArray(0);
     }
     else if (currentScene == 3) {
-        // Кубик с двумя смешанными текстурами
+        // Кубик с двумя смешанными текстурами (вода + дерево)
         glUseProgram(programCubeTwoTex);
 
         float model[16] = { 0 };
         model[0] = 1.0f; model[5] = 1.0f; model[10] = 1.0f; model[15] = 1.0f;
 
-        // Вращение кубика
+        // Автоповорот кубика
         static float rotation = 0.0f;
         rotation += 1.0f;
         float angle = rotation * 3.14159f / 180.0f;
@@ -539,15 +643,15 @@ void render() {
         glUniformMatrix4fv(projLoc, 1, GL_FALSE, projection);
         glUniform1f(mixRatioLoc, textureMixRatio);
 
-        // Активируем первую текстуру
+        // Активируем текстуру воды (texture1)
         glActiveTexture(GL_TEXTURE0);
-        glBindTexture(GL_TEXTURE_2D, texture1);
+        glBindTexture(GL_TEXTURE_2D, textureWater);
         GLint tex1Loc = glGetUniformLocation(programCubeTwoTex, "texture1");
         glUniform1i(tex1Loc, 0);
 
-        // Активируем вторую текстуру
+        // Активируем текстуру дерева (texture2)
         glActiveTexture(GL_TEXTURE1);
-        glBindTexture(GL_TEXTURE_2D, texture2);
+        glBindTexture(GL_TEXTURE_2D, textureWood);
         GLint tex2Loc = glGetUniformLocation(programCubeTwoTex, "texture2");
         glUniform1i(tex2Loc, 1);
 
@@ -557,13 +661,13 @@ void render() {
         glBindVertexArray(0);
     }
     else if (currentScene == 4) {
-        // Градиентный круг
+        // Градиентный круг (статичный)
         glUseProgram(programCircle);
 
         float model[16] = { 0 };
         model[0] = circleScaleX;
         model[5] = circleScaleY;
-        model[10] = circleScaleZ;
+        model[10] = 1.0f;  // Фиксированный масштаб по Z
         model[15] = 1.0f;
 
         GLint modelLoc = glGetUniformLocation(programCircle, "model");
@@ -613,35 +717,45 @@ LRESULT CALLBACK WindowProc(HWND hWnd, UINT uMsg, WPARAM wParam, LPARAM lParam) 
         case 'Q': tetraZ += 0.1f; break;
         case 'E': tetraZ -= 0.1f; break;
 
-            // Влияние цвета на кубик (сцена 2)
+            // Влияние цвета на текстуру (сцена 2)
         case VK_OEM_PLUS:
         case VK_ADD:
-            cubeColorInfluence = min(cubeColorInfluence + 0.1f, 1.0f);
-            cout << "Color influence: " << cubeColorInfluence << endl;
+            colorInfluence = min(colorInfluence + 0.1f, 1.0f);
+            cout << "Color influence on texture: " << colorInfluence << " (0=текстура, 1=текстура*цвет)" << endl;
             break;
         case VK_OEM_MINUS:
         case VK_SUBTRACT:
-            cubeColorInfluence = max(cubeColorInfluence - 0.1f, 0.0f);
-            cout << "Color influence: " << cubeColorInfluence << endl;
+            colorInfluence = max(colorInfluence - 0.1f, 0.0f);
+            cout << "Color influence on texture: " << colorInfluence << " (0=текстура, 1=текстура*цвет)" << endl;
             break;
 
-            // Смешивание текстур (сцена 3)
+            // Смешивание текстур вода/дерево (сцена 3)
         case 'M':
             textureMixRatio = min(textureMixRatio + 0.1f, 1.0f);
-            cout << "Texture mix ratio: " << textureMixRatio << endl;
+            cout << "Texture mix ratio: " << textureMixRatio << " (0=вода, 1=дерево)" << endl;
             break;
         case 'N':
             textureMixRatio = max(textureMixRatio - 0.1f, 0.0f);
-            cout << "Texture mix ratio: " << textureMixRatio << endl;
+            cout << "Texture mix ratio: " << textureMixRatio << " (0=вода, 1=дерево)" << endl;
             break;
 
             // Масштабирование круга (сцена 4)
-        case 'X': circleScaleX += 0.1f; break;
-        case 'C': circleScaleX = max(circleScaleX - 0.1f, 0.1f); break;
-        case 'Y': circleScaleY += 0.1f; break;
-        case 'U': circleScaleY = max(circleScaleY - 0.1f, 0.1f); break;
-        case 'Z': circleScaleZ += 0.1f; break;
-        case 'H': circleScaleZ = max(circleScaleZ - 0.1f, 0.1f); break;
+        case 'X':
+            circleScaleX += 0.1f;
+            cout << "Circle scale X: " << circleScaleX << endl;
+            break;
+        case 'C':
+            circleScaleX = max(circleScaleX - 0.1f, 0.1f);
+            cout << "Circle scale X: " << circleScaleX << endl;
+            break;
+        case 'Y':
+            circleScaleY += 0.1f;
+            cout << "Circle scale Y: " << circleScaleY << endl;
+            break;
+        case 'U':
+            circleScaleY = max(circleScaleY - 0.1f, 0.1f);
+            cout << "Circle scale Y: " << circleScaleY << endl;
+            break;
 
         case VK_ESCAPE:
             PostQuitMessage(0);
@@ -767,9 +881,9 @@ int main() {
 
     cout << "=== OpenGL VBO Demo ===" << endl;
     cout << "Scene 1: Colored tetrahedron (WASD/QE to move)" << endl;
-    cout << "Scene 2: Textured cube (+/- to adjust color influence)" << endl;
-    cout << "Scene 3: Dual-textured cube (M/N to adjust mix ratio)" << endl;
-    cout << "Scene 4: Gradient circle (X/C,Y/U,Z/H to scale)" << endl;
+    cout << "Scene 2: Cube with water texture (+/- to adjust color influence: текстура умножается на цвет вершин)" << endl;
+    cout << "Scene 3: Cube mixing water and wood textures (M/N to adjust mix ratio: 0=вода, 1=дерево)" << endl;
+    cout << "Scene 4: Static gradient circle (X/C for X scale, Y/U for Y scale)" << endl;
     cout << "Press 1-4 to switch scenes, ESC to exit" << endl;
 
     HINSTANCE hInstance = GetModuleHandle(NULL);
